@@ -62,6 +62,7 @@ use crate::parser::exif;
 use crate::parser::mp4box;
 use crate::parser::mp4box::*;
 use crate::parser::obu::Av1SequenceHeader;
+use crate::utils::clap::CropRect;
 use crate::utils::pixels::ChannelIdc;
 use crate::utils::pixels::Pixels;
 use crate::*;
@@ -144,6 +145,14 @@ pub enum Source {
 pub const DEFAULT_IMAGE_SIZE_LIMIT: u32 = 16384 * 16384;
 pub const DEFAULT_IMAGE_DIMENSION_LIMIT: u32 = 32768;
 pub const DEFAULT_IMAGE_COUNT_LIMIT: u32 = 12 * 3600 * 60;
+
+/// Options for [`Decoder::next_image_with_options()`] and [`Decoder::nth_image_with_options()`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DecodeOptions {
+    /// If set, only this region of the image is decoded. Region decoding is not implemented yet:
+    /// decoding fails with AvifError::NotImplemented if this is set.
+    pub crop_rect: Option<CropRect>,
+}
 
 #[derive(Debug, PartialEq)]
 pub enum ImageContentType {
@@ -406,6 +415,7 @@ pub struct Decoder {
     // Color format used by the previous decode, kept separately from `settings` (which the caller
     // may change between decode calls) so that a change can be detected and the decoder reset.
     previous_android_mediacodec_output_color_format: Option<AndroidMediaCodecOutputColorFormat>,
+    parsed_image: Image,
 }
 
 #[repr(C)]
@@ -1452,6 +1462,7 @@ impl Decoder {
         self.active_thumbnail_index = decoder.active_thumbnail_index;
         self.previous_android_mediacodec_output_color_format =
             decoder.previous_android_mediacodec_output_color_format;
+        self.parsed_image = decoder.parsed_image;
     }
 
     pub fn parse(&mut self) -> AvifResult<()> {
@@ -1735,6 +1746,7 @@ impl Decoder {
             };
 
             if cicp_set {
+                self.parsed_image = self.image.shallow_clone();
                 self.parse_state = ParseState::Complete;
                 return Ok(());
             }
@@ -1746,6 +1758,7 @@ impl Decoder {
         if self.source == Source::Thumbnail && !self.thumbnail_images.is_empty() {
             self.thumbnail_images[0] = self.image.shallow_clone();
         }
+        self.parsed_image = self.image.shallow_clone();
         self.parse_state = ParseState::Complete;
 
         Ok(())
@@ -2349,11 +2362,20 @@ impl Decoder {
     }
 
     pub fn next_image(&mut self) -> AvifResult<()> {
+        self.next_image_with_options(&DecodeOptions::default())
+    }
+
+    /// Same as [`Decoder::next_image()`] with the given options. See [`DecodeOptions`].
+    pub fn next_image_with_options(&mut self, options: &DecodeOptions) -> AvifResult<()> {
         if self.io.is_none() {
             return AvifError::io_not_set();
         }
         if !self.parsing_complete() {
             return AvifError::no_content();
+        }
+        if options.crop_rect.is_some() {
+            // TODO: b/578636390 - Support region decoding.
+            return AvifError::not_implemented();
         }
 
         let next_image_index = checked_add!(self.image_index, 1)?;
@@ -2402,6 +2424,7 @@ impl Decoder {
                 }
                 self.codecs.clear();
                 self.active_thumbnail_index = Some(thumbnail_idx);
+                self.parsed_image = self.image.shallow_clone();
             }
             0
         } else {
@@ -2473,8 +2496,21 @@ impl Decoder {
     }
 
     pub fn nth_image(&mut self, index: u32) -> AvifResult<()> {
+        self.nth_image_with_options(index, &DecodeOptions::default())
+    }
+
+    /// Same as [`Decoder::nth_image()`] with the given options. See [`DecodeOptions`].
+    pub fn nth_image_with_options(
+        &mut self,
+        index: u32,
+        options: &DecodeOptions,
+    ) -> AvifResult<()> {
         if !self.parsing_complete() {
             return AvifError::no_content();
+        }
+        if options.crop_rect.is_some() {
+            // TODO: b/578636390 - Support region decoding.
+            return AvifError::not_implemented();
         }
         if index >= self.image_count {
             return AvifError::no_images_remaining();
@@ -2658,7 +2694,11 @@ impl Decoder {
         if self.source == Source::Thumbnail {
             Ok(self.thumbnail_images[n as usize].shallow_clone())
         } else {
-            Ok(self.image.shallow_clone())
+            let mut props = self.image.shallow_clone();
+            props.width = self.parsed_image.width;
+            props.height = self.parsed_image.height;
+            props.clap = self.parsed_image.clap;
+            Ok(props)
         }
     }
 
