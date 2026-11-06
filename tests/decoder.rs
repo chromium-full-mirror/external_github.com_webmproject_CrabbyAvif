@@ -2547,6 +2547,148 @@ fn region_decode_grid_matrix(yuv_format: &str, depth: u8, alpha: &str) -> AvifRe
     Ok(())
 }
 
+#[cfg(feature = "encoder")]
+#[test_case(false ; "single_tile")]
+#[test_case(true ; "grid_3x3")]
+fn region_decode_with_clean_aperture(is_grid: bool) -> AvifResult<()> {
+    if !HAS_ENCODER || !HAS_DECODER {
+        return Ok(());
+    }
+    let settings = encoder::Settings {
+        speed: Some(10),
+        mutable: encoder::MutableSettings {
+            quality: 100.0,
+            quality_alpha: 100.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut enc = encoder::Encoder::create_with_settings(&settings)?;
+    let (canvas_w, canvas_h, clap_rect) = if is_grid {
+        let mut cells = Vec::new();
+        for _ in 0..9 {
+            cells.push(generate_gradient_image(
+                80,
+                80,
+                8,
+                PixelFormat::Yuv420,
+                YuvRange::Full,
+                true,
+            )?);
+        }
+        // Canvas 240x240, clap at (20, 30) size 160x150.
+        let rect = CropRect {
+            x: 20,
+            y: 30,
+            width: 160,
+            height: 150,
+        };
+        let clap = crabby_avif::utils::clap::CleanAperture::create_from(
+            &rect,
+            240,
+            240,
+            PixelFormat::Yuv420,
+        )?;
+        for cell in &mut cells {
+            cell.clap = Some(clap);
+        }
+        let refs: Vec<&Image> = cells.iter().collect();
+        enc.add_image_grid(3, 3, &refs)?;
+        (240u32, 240u32, rect)
+    } else {
+        let mut img =
+            generate_gradient_image(120, 160, 8, PixelFormat::Yuv420, YuvRange::Full, true)?;
+        let rect = CropRect {
+            x: 12,
+            y: 14,
+            width: 96,
+            height: 132,
+        };
+        img.clap = Some(crabby_avif::utils::clap::CleanAperture::create_from(
+            &rect,
+            120,
+            160,
+            PixelFormat::Yuv420,
+        )?);
+        enc.add_image(&img)?;
+        (120u32, 160u32, rect)
+    };
+    let edata = enc.finish()?;
+
+    let mut ref_decoder = decoder::Decoder::default();
+    ref_decoder.set_io_vec(edata.clone());
+    ref_decoder.parse()?;
+    let orig_clap = ref_decoder.image().unwrap().clap;
+    assert!(orig_clap.is_some());
+    ref_decoder.nth_image(0)?;
+    let ref_full = ref_decoder.image().unwrap().try_deep_clone()?;
+
+    let mut decoder = decoder::Decoder::default();
+    decoder.set_io_vec(edata);
+    decoder.parse()?;
+
+    // User crop with odd (x, y) inside clap_rect: (5, 7, 61, 59).
+    // Composed with clap_rect (even x, y): (clap.x + 5, clap.y + 7), aligned down to
+    // (clap.x + 4, clap.y + 6).
+    let user_crop = CropRect {
+        x: 5,
+        y: 7,
+        width: 61,
+        height: 59,
+    };
+    decoder.nth_image_with_options(
+        0,
+        &decoder::DecodeOptions {
+            crop_rect: Some(user_crop),
+        },
+    )?;
+    let decoded = decoder.image().unwrap();
+    assert_eq!(decoded.width, 61);
+    assert_eq!(decoded.height, 59);
+    // clap must be cleared on the cropped output image.
+    assert!(decoded.clap.is_none());
+
+    let expected_unaligned = CropRect {
+        x: clap_rect.x + user_crop.x,
+        y: clap_rect.y + user_crop.y,
+        width: user_crop.width,
+        height: user_crop.height,
+    };
+    let expected = crop_reference_image(&ref_full, &expected_unaligned)?;
+    assert!(utils::are_images_equal(decoded, &expected)?);
+
+    // nth_image_properties(0) must still report original uncropped dimensions and clap.
+    let props = decoder.nth_image_properties(0)?;
+    assert_eq!(props.width, canvas_w);
+    assert_eq!(props.height, canvas_h);
+    assert_eq!(props.clap, orig_clap);
+
+    // A crop_rect that fits in canvas_w x canvas_h but exceeds clap_rect must be rejected!
+    let out_of_clap = CropRect {
+        x: clap_rect.width - 4,
+        y: 0,
+        width: 8,
+        height: 10,
+    };
+    assert!(decoder
+        .nth_image_with_options(
+            0,
+            &decoder::DecodeOptions {
+                crop_rect: Some(out_of_clap),
+            }
+        )
+        .is_err());
+
+    // Subsequent uncropped decode restores original uncropped dimensions and clap.
+    decoder.nth_image(0)?;
+    let uncropped = decoder.image().unwrap();
+    assert_eq!(uncropped.width, canvas_w);
+    assert_eq!(uncropped.height, canvas_h);
+    assert_eq!(uncropped.clap, orig_clap);
+    assert!(utils::are_images_equal(uncropped, &ref_full)?);
+    Ok(())
+}
+
 #[test]
 fn region_decode_cache_and_state_transitions() -> AvifResult<()> {
     if !HAS_DECODER {
