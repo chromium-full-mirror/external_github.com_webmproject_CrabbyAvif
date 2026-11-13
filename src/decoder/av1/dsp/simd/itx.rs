@@ -17,12 +17,11 @@
 //! Same 2D process as the portable [`crate::decoder::av1::dsp::itx::inv_txfm_add`],
 //! with every 1D transform run on lane vectors, one transform per lane:
 //!
-//! * Row pass: `RN` rows at a time (one row per lane). Coefficient tiles
-//!   of `RN x RN` are transposed on load and on store, so the row-major
-//!   layout of the intermediate buffer is the same as in the portable
-//!   code. Identity rows are element-wise and need no transposes.
-//! * Column pass: `CN` adjacent columns at a time (one column per lane),
-//!   followed by the residual add with clipping.
+//! * Row pass: `RN` rows at a time (one row per lane). Coefficient tiles of `RN x RN` are
+//!   transposed on load and on store, so the row-major layout of the intermediate buffer is the
+//!   same as in the portable code. Identity rows are element-wise and need no transposes.
+//! * Column pass: `CN` adjacent columns at a time (one column per lane), followed by the residual
+//!   add with clipping.
 //!
 //! The 1D kernels are generated
 //! (`src/decoder/av1/dsp/itx/gen_kernels.py --simd`) and are generic over
@@ -263,14 +262,16 @@ impl<const N: usize> TxLanes for Wide<N> {
 /// Every value stored by the spec's butterflies and Hadamard steps then
 /// fits in 16 bits: the Hadamard outputs are clamped to 16 bits, which is
 /// exactly a saturating add / subtract, and conformance requires the
-/// butterfly outputs `Round2(x, 12)` to be representable with `r = 16`
-/// bits (7.13.2.1). The products are computed widened to `i32` (inputs of
-/// 16 bits times constants of at most 14 bits, at most 4 terms, fit) and
-/// narrowed with saturation (on aarch64, products with constants `|k| <=
-/// 4096` are narrowed modulo 2^16 instead, see `dot_rnd12_wrap`; the same
-/// for conformant streams). Negations saturate (`-(-32768)` gives 32767
-/// instead of 32768, which is the same after the clamp / `Round2` that
-/// follows every negated output).
+/// 2-input `B` butterfly outputs `Round2(x, 12)` to be representable with
+/// `r = 16` bits (7.13.2.1). The products are computed widened to `i32`
+/// (inputs of 16 bits times constants of at most 14 bits, at most 4 terms,
+/// fit) and narrowed with saturation (on aarch64, 1- and 2-term `B`
+/// products with constants `|k| <= 4096` are narrowed modulo 2^16 instead,
+/// see `dot_rnd12_wrap`; `ADST4`'s `dot_rnd12` saturates because 7.13.2.6
+/// only bounds the unrounded 4-term sums to `r + 12` bits `< 2^27`, which
+/// allows `Round2(x, 12) == 32768` on conformant streams). Negations
+/// saturate (`-(-32768)` gives 32767 instead of 32768, which is the same
+/// after the clamp / `Round2` that follows every negated output).
 ///
 /// For non-conformant streams the results may differ from the spec (but
 /// all arithmetic is wrapping or saturating, so it never panics).
@@ -385,6 +386,7 @@ fn pmadd16(ab: Simd<i16, 16>, ka: i32, kb: i32) -> Simd<i32, 8> {
 /// constant. Every lane of `pmaddwd` is exact: `|a| <= 2^15` and `|k| <= 2^14`.
 /// Returns `None` for unsupported lane counts.
 #[inline(always)]
+#[rustfmt::skip]
 fn dot_rnd12_pmadd<const N: usize, const K: usize, const WRAP: bool>(
     a: [Simd<i16, N>; K],
     k: [i32; K],
@@ -472,6 +474,7 @@ fn dot_rnd12_pmadd<const N: usize, const K: usize, const WRAP: bool>(
 
 /// Narrows `i32` lanes to `i16` with saturation (`packssdw`).
 #[inline(always)]
+#[rustfmt::skip]
 pub(super) fn sat16<const N: usize>(x: Simd<i32, N>) -> Simd<i16, N> {
     x.simd_clamp(Simd::splat(i16::MIN as i32), Simd::splat(i16::MAX as i32))
         .cast()
@@ -599,9 +602,6 @@ impl<const N: usize> TxLanes for S16<N> {
     }
     #[inline(always)]
     fn dot_rnd12<const K: usize>(a: [Self; K], k: [i32; K]) -> Self {
-        if let Some(r) = dot_rnd12_wrap::<N, K, false>(amap(a, |a| a.0), k) {
-            return S16(r);
-        }
         if let Some(r) = dot_rnd12_pmadd::<N, K, false>(amap(a, |a| a.0), k) {
             return S16(r);
         }
@@ -738,6 +738,7 @@ pub(crate) struct Clamp<V> {
 
 impl<V: TxLanes> Clamp<V> {
     #[inline(always)]
+    #[rustfmt::skip]
     fn bits(r: u32) -> Self {
         debug_assert!(!V::SATURATING_16 || r == 16);
         Clamp {
@@ -762,6 +763,7 @@ type Kern<V> = fn(&mut [V], Clamp<V>);
 /// given that only the first `nz` inputs (`1 <= nz <= 32`) can be
 /// non-zero (see the portable `select_1d`).
 #[inline(always)]
+#[rustfmt::skip]
 fn select<V: TxLanes>(kind: Tx1d, log2n: usize, nz: usize) -> Kern<V> {
     use kernels::*;
     // 0 for nz <= 1, 1 for 2, 2 for 3..=4, 3 for 5..=8, 4 for 9..=16, 5 for 17..=32.
@@ -1022,6 +1024,7 @@ use entries;
 
 /// [`size_entry`] for the transform type `TxType::ALL[TT]` (the type
 /// bits of `eob_type` are ignored).
+#[rustfmt::skip]
 fn typed_entry<T: Pixel, const BD: u32, const W: usize, const H: usize, const TT: u8>(
     dst: &mut [T],
     stride: usize,
@@ -1051,6 +1054,7 @@ fn size_entry<T: Pixel, const BD: u32, const W: usize, const H: usize>(
 
 /// Body of [`size_entry`], inlined into [`typed_entry`].
 #[inline(always)]
+#[rustfmt::skip]
 fn size_entry_inl<T: Pixel, const BD: u32, const W: usize, const H: usize>(
     dst: &mut [T],
     stride: usize,
@@ -1385,6 +1389,7 @@ fn rows_fit_i32<V: RowLanes<N>, const N: usize>(t: &[V]) -> bool {
 /// non-zero input): the 1D transforms and the transposed store of the
 /// outputs to `buf` (stride `W`).
 #[inline(always)]
+#[rustfmt::skip]
 fn row_group_tail<V: RowLanes<N>, const N: usize, const W: usize>(
     t: &mut [V; W],
     nz: usize,
@@ -1484,6 +1489,7 @@ fn row_pass_identity<V: RowLanes<N>, const N: usize>(buf: &mut [i32], p: &Params
 /// Column transforms of height `H`, `N` columns at a time, with the
 /// final Round2(T[i], colShift = 4), added to the frame with the flips
 /// of 7.12.3 step 3. Rows at or beyond `nz_rows` of `buf` are zero.
+#[rustfmt::skip]
 fn col_pass_bd<T: Pixel, const N: usize, const H: usize, const BD: u32>(
     dst: &mut [T],
     stride: usize,
@@ -1629,6 +1635,7 @@ fn transpose_e<E: SimdElement, const N: usize>(mut m: [Simd<E, N>; N]) -> [Simd<
 /// One more than the index of the last non-zero lane of `v` (0 if all
 /// are zero). Avoids `to_bitmask`, which is slow on aarch64.
 #[inline(always)]
+#[rustfmt::skip]
 fn last_nz_lane<const N: usize>(v: Simd<i32, N>) -> usize {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1647,6 +1654,7 @@ fn last_nz_lane<const N: usize>(v: Simd<i32, N>) -> usize {
 /// One more than the index of the last non-zero lane of `v` (0 if all
 /// are zero).
 #[inline(always)]
+#[rustfmt::skip]
 pub(super) fn last_nz_lane16<const N: usize>(v: Simd<i16, N>) -> usize {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1747,6 +1755,7 @@ fn iadst8_tail<V: TxLanes>(
 // the callers would exceed the default 2 MiB thread stack.
 #[cfg_attr(debug_assertions, inline(never))]
 #[cfg_attr(not(debug_assertions), inline(always))]
+#[rustfmt::skip]
 fn dct_adst_small<V: TxLanes, const N: usize>(kind: Tx1d, le4: bool, t: &mut [V; N], c: Clamp<V>) {
     if N == 4 {
         let [i0, i1, i2, i3] = [t[0], t[1], t[2], t[3]];
@@ -1837,6 +1846,7 @@ fn dct_adst_small<V: TxLanes, const N: usize>(kind: Tx1d, le4: bool, t: &mut [V;
 /// (`eob_rows <= 4 && eob_cols <= 4`). Loads/zeroes only the 4x4
 /// sub-block and transforms the 4 active rows on 4-lane vectors.
 #[inline(always)]
+#[rustfmt::skip]
 fn transform_add_8x8_sub4<T: Pixel, const BD: u32>(
     dst: &mut [T],
     stride: usize,
@@ -1913,6 +1923,7 @@ fn sub4_8x8_rows32<const BD: u32>(rows: [Simd<i32, 4>; 4], row_kind: Tx1d) -> [S
 /// `[Round2(lo, 12) | Round2(hi, 12)]` narrowed with saturation
 /// (`psrad` + `packssdw`).
 #[inline(always)]
+#[rustfmt::skip]
 fn pack_rnd12(lo: Simd<i32, 4>, hi: Simd<i32, 4>) -> Simd<i16, 8> {
     let r = Simd::splat(1 << 11);
     simd_swizzle!(
@@ -1960,6 +1971,7 @@ fn dct_adst4_packed(adst: bool, a: Simd<i16, 8>, b: Simd<i16, 8>) -> [Simd<i16, 
 /// `[row 2 | row 3]`) instead of four half-empty 4-lane vectors. Returns
 /// false (doing nothing) for other types.
 #[inline(always)]
+#[rustfmt::skip]
 fn transform_add_4x4_packed<T: Pixel, const BD: u32>(
     dst: &mut [T],
     stride: usize,
@@ -2058,10 +2070,11 @@ fn transpose4x4_packed(a: Simd<i16, 8>, b: Simd<i16, 8>) -> [Simd<i16, 8>; 2] {
     [c01, c23]
 }
 
-/// `Round2(x, 12)` of the two 4-lane sums narrowed *modulo 2^16* and
-/// packed as `[lo | hi]` (`rshrn` + `rshrn2` on NEON). Exact whenever the
-/// results fit in 16 bits, which they do for conformant streams (see
-/// `S16`; for 10-bit rows [`transform_add_4x4_neon`] checks it).
+/// `Round2(x, 12)` of the two 4-lane `B` butterfly sums narrowed *modulo
+/// 2^16* and packed as `[lo | hi]` (`rshrn` + `rshrn2` on NEON). Exact
+/// whenever the results fit in 16 bits, which 7.13.2.1 guarantees for
+/// conformant `DCT4` streams (see `S16`; for 10-bit rows
+/// [`transform_add_4x4_neon`] checks it).
 #[inline(always)]
 fn narrow2_rnd12(lo: Simd<i32, 4>, hi: Simd<i32, 4>) -> Simd<i16, 8> {
     let r = Simd::splat(1 << 11);
@@ -2079,8 +2092,11 @@ fn narrow2_rnd12(lo: Simd<i32, 4>, hi: Simd<i32, 4>) -> Simd<i16, 8> {
 /// constant vector `k` (`ADST4_K` or `DCT4_K`), so that the constants
 /// live in one register instead of one `dup` each. The `i32` sums are
 /// exact for 16-bit inputs (the absolute constants of an output add up
-/// to at most 10950 < 2^16).
+/// to at most 10950 < 2^16). `ADST4` narrows with saturation (`pack_rnd12`)
+/// because 7.13.2.6 bounds `o0..o3` to `< 2^27` before `Round2(.., 12)`,
+/// allowing `Round2(o, 12) == 32768` on conformant streams.
 #[inline(always)]
+#[rustfmt::skip]
 fn dct_adst4_neon(
     adst: bool,
     x01: Simd<i16, 8>,
@@ -2102,7 +2118,7 @@ fn dct_adst4_neon(
         let o1 = x0 * kl!(1) + x1 * kl!(2) + x2 * kl!(4) + x3 * kl!(7);
         let o2 = x0 * kl!(2) + x2 * kl!(6) + x3 * kl!(2);
         let o3 = x0 * kl!(3) + x1 * kl!(6) + x2 * kl!(1) + x3 * kl!(4);
-        [narrow2_rnd12(o0, o1), narrow2_rnd12(o2, o3)]
+        [pack_rnd12(o0, o1), pack_rnd12(o2, o3)]
     } else {
         // k = [2896, -2896, 1567, 3784, -3784, 0, 0, 0].
         let a0 = x0 * kl!(0) + x2 * kl!(0);
@@ -2127,6 +2143,7 @@ const DCT4_K: [i16; 8] = [2896, -2896, 1567, 3784, -3784, 0, 0, 0];
 /// Adds the residual rows `r = [row a | row b]` to the two 4-pixel rows
 /// `da` and `db` with clipping to `BD` bits.
 #[inline(always)]
+#[rustfmt::skip]
 fn add_rows2_4<T: Pixel, const BD: u32>(da: &mut [T; 4], db: &mut [T; 4], r: Simd<i16, 8>) {
     let max = Simd::splat((1 << BD) - 1);
     let (aa, ab): (&mut dyn Any, &mut dyn Any) = (&mut *da, &mut *db);
@@ -2642,6 +2659,7 @@ fn add_rows16<T: Pixel, const N: usize, const H: usize, const BD: u32>(
 /// clipping to `BD` bits (exact for arbitrary residuals narrowed via
 /// [`sat16`]).
 #[inline(always)]
+#[rustfmt::skip]
 fn add_rows2_4_sat<T: Pixel, const BD: u32>(da: &mut [T; 4], db: &mut [T; 4], r: Simd<i16, 8>) {
     let max = Simd::splat((1 << BD) - 1);
     let (aa, ab): (&mut dyn Any, &mut dyn Any) = (&mut *da, &mut *db);
@@ -2900,6 +2918,7 @@ fn inv_wht4x4_add_bd<T: Pixel, const BD: u32>(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[rustfmt::skip]
 mod tests {
     use super::*;
     use crate::decoder::av1::dsp::itx as portable;
@@ -3328,6 +3347,57 @@ mod tests {
         }
         run::<u8, 8>(0x1357_9bdf_2468_ace0);
         run::<u16, 10>(0x0246_8ace_1357_9bdf);
+    }
+
+    /// Conformant `ADST4` inputs whose unrounded 4-term sum `x` lies in
+    /// `[2^27 - 2048, 2^27 - 1]` satisfy the `(r + 12)`-bit bound of spec
+    /// 7.13.2.6 while producing `Round2(x, 12) == 32768`, which must
+    /// saturate to `32767` rather than wrap to `-32768` on Arm.
+    #[test]
+    fn adst4_round2_32768_matches_portable() {
+        fn run<T: Pixel, const BD: u32>() {
+            // Row [1952, 872, 32767, 1656]: x0 = 134_217_653 < 2^27, Round2(x0, 12) = 32768.
+            // Row [32767, -1230, 1230, -1845]: x3 = 134_216_126 < 2^27, Round2(x3, 12) = 32768.
+            for row in [[1952, 872, 32767, 1656], [32767, -1230, 1230, -1845]] {
+                for tx_size in [TxSize::Tx4x4, TxSize::Tx4x8, TxSize::Tx4x16] {
+                    let w = 1usize << TX_WIDTH_LOG2[tx_size.idx()];
+                    let h = 1usize << TX_HEIGHT_LOG2[tx_size.idx()];
+                    for tx_type in [
+                        TxType::ADST_ADST,
+                        TxType::DCT_ADST,
+                        TxType::ADST_DCT,
+                        TxType::FLIPADST_ADST,
+                    ] {
+                        let mut coeffs = vec![0i32; w * h];
+                        coeffs[..4].copy_from_slice(&row);
+                        let eob = w * h;
+                        let frame = vec![T::from_i32(1 << (BD - 1)); w * h];
+                        let mut want = frame.clone();
+                        portable::conformance::take_violated();
+                        let mut c_want = coeffs.clone();
+                        portable::inv_txfm_add(
+                            &mut want,
+                            w,
+                            &mut c_want,
+                            tx_size,
+                            tx_type,
+                            false,
+                            eob,
+                            BD,
+                        );
+                        assert!(!portable::conformance::take_violated());
+                        let mut got = frame;
+                        let mut c_got = coeffs;
+                        inv_txfm_add_bd::<T, BD>(
+                            &mut got, w, &mut c_got, tx_size, tx_type, false, eob, BD,
+                        );
+                        assert_eq!(got, want, "mismatch: {tx_size:?} {tx_type:?} bd={BD}");
+                    }
+                }
+            }
+        }
+        run::<u8, 8>();
+        run::<u16, 10>();
     }
 
     /// Sparse blocks with `nz_rows` and `nz_cols` in `1..=4` exercise the
